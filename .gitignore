@@ -22,6 +22,9 @@ env/
 *.swp
 *.swo
 
+# Claude Code (user-local agent state)
+.claude/settings.local.json
+
 # macOS
 .DS_Store
 
