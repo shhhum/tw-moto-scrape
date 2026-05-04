@@ -26,4 +26,18 @@ jobs:
         run: playwright install --with-deps chromium
 
       - name: Run scrape
-        run: python check_moto_test.py
+        id: scrape
+        run: |
+          python check_moto_test.py | tee scrape-output.txt
+          if grep -q "^Upcoming motorcycle road-test slots" scrape-output.txt; then
+            echo "has_slots=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Notify via ntfy
+        if: steps.scrape.outputs.has_slots == 'true'
+        run: |
+          curl --fail-with-body \
+            -H "Title: Motorcycle road-test slots — Taipei / New Taipei" \
+            -H "Tags: motor_scooter" \
+            --data-binary @scrape-output.txt \
+            https://ntfy.sh/tw_moto_exams
