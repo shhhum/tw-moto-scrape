@@ -33,17 +33,11 @@ jobs:
             echo "has_slots=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Email results
+      - name: Notify via ntfy
         if: steps.scrape.outputs.has_slots == 'true'
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          secure: true
-          username: ${{ secrets.MAIL_USERNAME }}
-          password: ${{ secrets.MAIL_APP_PASSWORD }}
-          from: tw-moto-scrape <${{ secrets.MAIL_USERNAME }}>
-          to: andrewjshum@gmail.com
-          subject: "Motorcycle road-test slots available — Taipei / New Taipei"
-          body: file://scrape-output.txt
-          convert_markdown: false
+        run: |
+          curl --fail-with-body \
+            -H "Title: Motorcycle road-test slots — Taipei / New Taipei" \
+            -H "Tags: motor_scooter" \
+            --data-binary @scrape-output.txt \
+            https://ntfy.sh/tw_moto_exams
