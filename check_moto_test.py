@@ -133,6 +133,24 @@ async def main():
             extra_http_headers={"sec-ch-ua": SEC_CH_UA},
             ignore_https_errors=True,
         )
+        # The page re-fetches dozens of images / fonts / Google Custom Search
+        # assets on every submit. Locally it's fine; from a US-region GH
+        # Actions runner the round-trip-per-asset to Taiwan dominates and a
+        # full run can blow past the job timeout. None of these resources
+        # affect the form mechanics or the slot table, so abort them.
+        async def block_junk(route):
+            req = route.request
+            if req.resource_type in ("image", "font", "media", "stylesheet"):
+                await route.abort()
+                return
+            host = req.url.split("/")[2] if "://" in req.url else ""
+            if any(h in host for h in ("google.com", "gstatic.com", "googleapis.com",
+                                       "googletagmanager.com", "google-analytics.com")):
+                await route.abort()
+                return
+            await route.continue_()
+
+        await ctx.route("**/*", block_junk)
         page = await ctx.new_page()
 
         for region, dmv, name in STATIONS:
