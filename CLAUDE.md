@@ -8,7 +8,7 @@ A single-file Playwright async scraper that checks mvdis.gov.tw for motorcycle r
 
 Entry point: [check_moto_test.py](check_moto_test.py). No tests, no linter.
 
-Intended deployment: a Claude routine on a cron schedule (every 3h, 8am–8pm Asia/Taipei). [README.md](README.md) has the full deploy steps; [.claude/setup.sh](.claude/setup.sh) is the routine setup script that installs Python deps + Chromium (cached across runs).
+Intended deployment: a GitHub Actions cron workflow (every 3h, 8am–8pm Asia/Taipei). The workflow is at [.github/workflows/scrape.yml](.github/workflows/scrape.yml); [README.md](README.md) has the deploy notes and a "why not Claude routines" rationale (the routine env's outbound allowlist blocked Playwright's Chromium CDN — don't re-litigate without checking the README first).
 
 ## Setup & run
 
