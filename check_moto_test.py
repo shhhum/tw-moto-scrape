@@ -24,7 +24,7 @@ async def main():
         page = await browser.new_page()
 
         print(f"Opening {URL} ...")
-        await page.goto(URL, wait_until="networkidle", timeout=30000)
+        await page.goto(URL, wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(2000)
 
         # Dump all visible text so we can understand the page structure
