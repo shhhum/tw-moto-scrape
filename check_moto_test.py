@@ -3,10 +3,13 @@ Checks mvdis.gov.tw for upcoming motorcycle road-test (路考) slots at
 Taipei (臺北市) and New Taipei (新北市) DMV stations.
 
 The site is a JS-rendered booking form. The flow per station:
-  1. Pick license type (機車) and DMV station
+  1. Pick license type (機車), fill expectExamDateStr (ROC date YYYMMDD —
+     leave it blank and the site reports "no matching slots" for everything),
+     pick DMV region + station
   2. Submit (the std_btn link calls a JS query() function which POSTs the form)
   3. The result page shows either an empty #trnTable with a "no matching slots"
-     warning, or a populated tbody with dates / group descriptions / seat counts
+     warning, or a populated tbody with dates / group descriptions / seat counts.
+     Rows with "額滿" in the seat column are full and we skip them.
 
 The site soft-blocks headless browsers via UA / sec-ch-ua sniffing, so we spoof
 both. Hazard-perception (危險感知) bookings live on a separate platform and
@@ -20,6 +23,8 @@ Run:
 """
 
 import asyncio
+import re
+from datetime import date
 from playwright.async_api import async_playwright
 
 URL = "https://www.mvdis.gov.tw/m3-emv-trn/exm/locations"
@@ -51,16 +56,32 @@ MOTORCYCLE_LICENSES = [
 SKIP_KEYWORDS = ["危險感知", "危感"]
 
 
-async def query_one(page, license_label, region_val, dmv_val):
+def today_roc_date() -> str:
+    """ROC date for the expectExamDateStr field (民國 YYYMMDD)."""
+    t = date.today()
+    return f"{t.year - 1911:03d}{t.month:02d}{t.day:02d}"
+
+
+def clean_desc(text: str) -> str:
+    """Collapse newlines / runs of whitespace into single spaces."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+async def query_one(page, license_label, region_val, dmv_val, exam_date_roc):
     """Submit the form for one (license, station) and return parsed slot rows.
 
-    Returns a list of {date, desc, available} dicts. An empty list means the
-    site explicitly reported no matching slots for this combo.
+    Returns a list of {date, desc, available} dicts containing only slots that
+    have at least one open seat (i.e. not 額滿). An empty list means the site
+    reported no slots, or every slot was full.
     """
     await page.goto(URL, wait_until="domcontentloaded", timeout=60000)
     await page.wait_for_timeout(1500)
 
     await page.select_option("#licenseTypeCode", label=license_label)
+    # Without expectExamDateStr the site reports "查詢不到符合的考試場次" even
+    # when the station has slots. Fill with today's ROC date for a forward-
+    # looking window.
+    await page.fill("#expectExamDateStr", exam_date_roc)
     await page.select_option("#dmvNoLv1", value=region_val)
     # dmvNoLv1 onchange fetches dmvNo options via JS; give it a beat.
     await page.wait_for_timeout(1200)
@@ -85,18 +106,21 @@ async def query_one(page, license_label, region_val, dmv_val):
         cells = await tr.query_selector_all("td")
         if len(cells) < 3:
             continue
-        date_text = (await cells[0].inner_text()).strip()
-        desc_text = (await cells[1].inner_text()).strip()
-        avail_text = (await cells[2].inner_text()).strip()
+        date_text = clean_desc(await cells[0].inner_text())
+        desc_text = clean_desc(await cells[1].inner_text())
+        avail_text = clean_desc(await cells[2].inner_text())
+        if not date_text:
+            continue
         if any(skip in desc_text for skip in SKIP_KEYWORDS):
             continue
-        if not date_text and not desc_text:
-            continue
+        if "額滿" in avail_text:
+            continue  # session is full
         rows_out.append({"date": date_text, "desc": desc_text, "available": avail_text})
     return rows_out
 
 
 async def main():
+    exam_date = today_roc_date()
     sections = []  # (header, [row strings])
 
     async with async_playwright() as p:
@@ -114,13 +138,13 @@ async def main():
         for region, dmv, name in STATIONS:
             for lic in MOTORCYCLE_LICENSES:
                 try:
-                    slots = await query_one(page, lic, region, dmv)
+                    slots = await query_one(page, lic, region, dmv, exam_date)
                 except Exception as e:
                     print(f"[warn] {name} — {lic}: {type(e).__name__}: {e}")
                     continue
                 if slots:
                     rows = [
-                        f"  - {s['date']}  {s['desc']}  (seats: {s['available']})"
+                        f"  - {s['date']}  seats: {s['available']}  {s['desc']}"
                         for s in slots
                     ]
                     sections.append((f"{name} — {lic}", rows))
