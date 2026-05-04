@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Setup script for Claude routine runs.
-# Cached across runs (see https://code.claude.com/docs/en/claude-code-on-the-web.md#environment-caching),
-# so heavy installs (Chromium ~150 MB) only happen on the first run or when this script changes.
+# Canonical setup commands for the Claude routine cloud environment.
+# Paste the body below into the cloud env's Setup script field — see README step 3.
 set -euo pipefail
 
 pip install -r requirements.txt

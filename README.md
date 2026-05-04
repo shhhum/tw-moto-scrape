@@ -19,7 +19,7 @@ How the runtime works (per [routines.md](https://code.claude.com/docs/en/routine
 
 - Each run clones a **GitHub repo** fresh into an Anthropic-managed VM. Routines do not support local-bundle deploys (`claude --remote`'s upload path is one-off only).
 - **No filesystem persistence between runs.** Each run starts from a clean clone — anything you want to keep has to be committed back to the repo or pushed to external storage. We're skipping state for now (every run just prints fresh).
-- The runtime has Node.js + chromedriver pre-installed. **Playwright + Chromium are not** — install them via a setup script (cached) or a `SessionStart` hook (every run).
+- The runtime has Node.js + chromedriver pre-installed. **Playwright + Chromium are not** — installed via the cached environment setup script in step 3.
 
 ### 1. Pre-flight code changes
 
@@ -40,11 +40,16 @@ git commit -m "initial commit"
 gh repo create tw-moto-scrape --private --source=. --push
 ```
 
-### 3. Setup script
+### 3. Configure the cloud environment's setup script
 
-[.claude/setup.sh](.claude/setup.sh) installs the Python deps and Chromium. It's already in the repo and marked executable. Setup scripts run once and are cached across runs (see [environment caching](https://code.claude.com/docs/en/claude-code-on-the-web.md#environment-caching)), so the ~150 MB Chromium download only happens on the first run and whenever this script changes.
+Open the **Setup script** field on the routine's cloud environment (web UI or `/remote-env`) and paste:
 
-If you'd rather reinstall every session, swap to a [SessionStart hook](https://code.claude.com/docs/en/claude-code-on-the-web.md#install-dependencies-with-a-sessionsstart-hook).
+```bash
+pip install -r requirements.txt
+playwright install chromium
+```
+
+That's the body of [.claude/setup.sh](.claude/setup.sh) — kept in the repo for reference, but **not auto-executed** (setup scripts are environment-level, not project-level). Once saved, it's [cached across runs](https://code.claude.com/docs/en/claude-code-on-the-web.md#environment-caching), so the ~150 MB Chromium download only re-runs when the script content changes.
 
 ### 4. Schedule
 
