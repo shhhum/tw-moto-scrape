@@ -20,6 +20,16 @@ The workflow at [.github/workflows/scrape.yml](.github/workflows/scrape.yml):
 - Triggers on cron `0 0,3,6,9,12 * * *` (UTC), which is 08:00, 11:00, 14:00, 17:00, 20:00 Asia/Taipei.
 - Also exposes `workflow_dispatch` so you can run it on-demand from the Actions tab — useful while you're iterating on selectors.
 - Sets up Python 3.12 with pip cache, installs `requirements.txt`, runs `playwright install --with-deps chromium`, then executes the script.
+- If the script's output contains `Upcoming motorcycle road-test slots`, sends an email of that output to `andrewjshum@gmail.com`. No email is sent on "no slots" runs — the GH Actions log still has the full output for debugging.
+
+### Email notification — one-time secret setup
+
+The email step uses Gmail SMTP via [dawidd6/action-send-mail](https://github.com/dawidd6/action-send-mail) and needs two repo secrets (Settings → Secrets and variables → Actions):
+
+- `MAIL_USERNAME` — your Gmail address (also the `From:`).
+- `MAIL_APP_PASSWORD` — a Gmail [app password](https://myaccount.google.com/apppasswords) (16 chars, no spaces). Requires 2-step verification on the Google account; your normal Gmail password won't work.
+
+Until those are set, runs that find slots will fail at the email step (the rest of the run, including the script output in the log, still completes). If you want to run a workflow_dispatch without configuring email yet, comment out the `Email results` step in [.github/workflows/scrape.yml](.github/workflows/scrape.yml) — or set `continue-on-error: true` on it.
 
 ### Caveats
 
