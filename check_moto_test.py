@@ -15,16 +15,26 @@ The site soft-blocks headless browsers via UA / sec-ch-ua sniffing, so we spoof
 both. Hazard-perception (危險感知) bookings live on a separate platform and
 shouldn't appear in this table; we filter them out defensively anyway.
 
+Output is a JSON object on stdout — {ok, scraped_at, new_slots, current_slots,
+errors}. On a successful scrape the script also rewrites slot_state.json next
+to this file; that is how runs dedupe — only slots absent from the previous
+state land in new_slots. A total scrape failure reports {ok: false}, leaves
+the state file untouched, and exits non-zero.
+
 Setup:
     pip install -r requirements.txt
-    playwright install chromium chromium-headless-shell
+    playwright install chromium
 Run:
     python3 check_moto_test.py
 """
 
 import asyncio
+import json
 import re
-from datetime import date
+import sys
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
 from playwright.async_api import async_playwright
 
 URL = "https://www.mvdis.gov.tw/m3-emv-trn/exm/locations"
@@ -55,6 +65,14 @@ MOTORCYCLE_LICENSES = [
 # Filter out hazard-perception entries if the table ever contains them.
 SKIP_KEYWORDS = ["危險感知", "危感"]
 
+# Persistent dedupe state. Committed to the repo so each scheduled run can
+# diff against the previous one — the run container is ephemeral, so an
+# uncommitted state file is lost.
+STATE_FILE = Path(__file__).with_name("slot_state.json")
+
+# The schedule and the target site both live in Asia/Taipei.
+TAIPEI_TZ = timezone(timedelta(hours=8))
+
 
 def today_roc_date() -> str:
     """ROC date for the expectExamDateStr field (民國 YYYMMDD)."""
@@ -65,6 +83,35 @@ def today_roc_date() -> str:
 def clean_desc(text: str) -> str:
     """Collapse newlines / runs of whitespace into single spaces."""
     return re.sub(r"\s+", " ", text).strip()
+
+
+def slot_key(s: dict) -> str:
+    """Stable identity for a slot across runs (seat count deliberately excluded
+    so a 2→3 seat change does not re-notify)."""
+    return "|".join((s["station"], s["license"], s["date"], s["desc"]))
+
+
+def load_prev_slots() -> list:
+    """Slots recorded by the previous run; empty list if there is no state yet."""
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            return json.load(f).get("slots", [])
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def write_state(slots: list) -> None:
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "updated_at": datetime.now(TAIPEI_TZ).isoformat(timespec="seconds"),
+                "slots": slots,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+        f.write("\n")
 
 
 async def query_one(page, license_label, region_val, dmv_val, exam_date_roc):
@@ -121,7 +168,9 @@ async def query_one(page, license_label, region_val, dmv_val, exam_date_roc):
 
 async def main():
     exam_date = today_roc_date()
-    sections = []  # (header, [row strings])
+    scraped = []        # freshly scraped slot dicts this run
+    errors = []         # non-fatal per-query errors
+    done_units = set()  # (station, license) pairs that scraped without error
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -134,10 +183,9 @@ async def main():
             ignore_https_errors=True,
         )
         # The page re-fetches dozens of images / fonts / Google Custom Search
-        # assets on every submit. Locally it's fine; from a US-region GH
-        # Actions runner the round-trip-per-asset to Taiwan dominates and a
-        # full run can blow past the job timeout. None of these resources
-        # affect the form mechanics or the slot table, so abort them.
+        # assets on every submit. None affect the form mechanics or the slot
+        # table, and the round-trip-per-asset to Taiwan dominates run time, so
+        # abort them.
         async def block_junk(route):
             req = route.request
             if req.resource_type in ("image", "font", "media", "stylesheet"):
@@ -158,25 +206,61 @@ async def main():
                 try:
                     slots = await query_one(page, lic, region, dmv, exam_date)
                 except Exception as e:
-                    print(f"[warn] {name} — {lic}: {type(e).__name__}: {e}")
+                    errors.append(f"{name} — {lic}: {type(e).__name__}: {e}")
                     continue
-                if slots:
-                    rows = [
-                        f"  - {s['date']}  seats: {s['available']}  {s['desc']}"
-                        for s in slots
-                    ]
-                    sections.append((f"{name} — {lic}", rows))
+                done_units.add((name, lic))
+                for s in slots:
+                    scraped.append({
+                        "station": name,
+                        "license": lic,
+                        "date": s["date"],
+                        "desc": s["desc"],
+                        "available": s["available"],
+                    })
 
         await browser.close()
 
-    if sections:
-        print("Upcoming motorcycle road-test slots in Taipei / New Taipei DMV centers:\n")
-        for header, rows in sections:
-            print(header)
-            print("\n".join(rows))
-            print()
-    else:
-        print("No upcoming motorcycle road-test slots in Taipei or New Taipei DMV centers.")
+    now = datetime.now(TAIPEI_TZ).isoformat(timespec="seconds")
+    units_total = len(STATIONS) * len(MOTORCYCLE_LICENSES)
+
+    # Every query failed — site down, network blocked, or selectors broke.
+    # Leave the state file untouched so the last-known slots are not lost.
+    if not done_units:
+        print(json.dumps(
+            {"ok": False, "scraped_at": now, "errors": errors},
+            ensure_ascii=False,
+            indent=2,
+        ))
+        sys.exit(1)
+
+    prev_slots = load_prev_slots()
+    prev_keys = {slot_key(s) for s in prev_slots}
+
+    # Carry forward last-known slots for any (station, license) we could not
+    # reach this run, so a transient timeout does not drop them and then
+    # re-notify when they reappear. Freshly scraped units fully replace theirs.
+    current = {
+        slot_key(s): s
+        for s in prev_slots
+        if (s["station"], s["license"]) not in done_units
+    }
+    for s in scraped:
+        current[slot_key(s)] = s
+    current = list(current.values())
+
+    new_slots = [s for s in current if slot_key(s) not in prev_keys]
+
+    write_state(current)
+
+    print(json.dumps({
+        "ok": True,
+        "scraped_at": now,
+        "new_slots": new_slots,
+        "current_slots": current,
+        "errors": errors,
+        "units_total": units_total,
+        "units_failed": units_total - len(done_units),
+    }, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
