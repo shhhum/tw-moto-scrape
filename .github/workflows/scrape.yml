@@ -1,9 +1,10 @@
 name: Check moto test slots
 
+# Manual runs only. No cron: mvdis.gov.tw drops connections from GitHub's
+# datacenter IPs (every scheduled run May–July 2026 timed out on all queries
+# while reporting "no slots") — scheduling lives in launchd/ on a Taiwan
+# residential IP instead. See README "Where this can actually run".
 on:
-  schedule:
-    # Hourly 08:00–16:00 Asia/Taipei (UTC+8) → 00–08 UTC.
-    - cron: "0 0-8 * * *"
   workflow_dispatch:
 
 # Banqiao 普通重型機車 only. Clear these to scan the full station × license matrix.

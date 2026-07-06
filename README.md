@@ -1,6 +1,8 @@
 # tw-moto-scrape
 
-A Playwright async scraper that checks [mvdis.gov.tw](https://www.mvdis.gov.tw/m3-emv-trn/exm/locations) for upcoming motorcycle road-test (路考) slots at Taipei (臺北市) and New Taipei (新北市) DMV stations. Runs hourly (8am–4pm Taipei) on GitHub Actions, targeting Banqiao 普通重型機車, and pushes a notification to ntfy.sh on every run — slots open, no slots, or error. A local launchd runner is included as an alternative scheduler.
+A Playwright async scraper that checks [mvdis.gov.tw](https://www.mvdis.gov.tw/m3-emv-trn/exm/locations) for upcoming motorcycle road-test (路考) slots at Taipei (臺北市) and New Taipei (新北市) DMV stations. Runs hourly (8am–4pm) via launchd on a local Mac in Taiwan, targeting Banqiao 普通重型機車, and pushes a notification to ntfy.sh on every run — slots open, no slots, or error.
+
+**Why local?** mvdis.gov.tw silently drops connections from datacenter IPs. GitHub Actions runners (Azure, US) time out on every query — verified in run logs from May 12 through July 6, 2026, every "successful" scheduled run was actually 8 timeouts reported as "no slots" — and Claude Code cloud environments get `ERR_CONNECTION_RESET` even with unrestricted egress. A Taiwan residential IP is the only origin that has ever worked.
 
 ## Local run
 
@@ -11,37 +13,9 @@ playwright install chromium
 python3 check_moto_test.py
 ```
 
-## Deploying to GitHub Actions
+## Running on a schedule (macOS launchd — the actual deployment)
 
-Goal: check Banqiao 普通重型機車 hourly from 8am–4pm Taipei time and push the result to the phone every run, so silence unambiguously means "the workflow didn't run".
-
-The workflow at [.github/workflows/scrape.yml](.github/workflows/scrape.yml):
-
-- Triggers on cron `0 0-8 * * *` (UTC), which is hourly 08:00–16:00 Asia/Taipei (9 runs/day).
-- Also exposes `workflow_dispatch` so you can run it on-demand from the Actions tab.
-- Narrows the scrape via `MVDIS_STATIONS=板橋` / `MVDIS_LICENSES=普通重型機車` job env vars — clear them to scan the full station × license matrix.
-- Sets up Python 3.12 with pip cache, installs `requirements.txt`, runs `playwright install --with-deps chromium`, then executes the script.
-- Notifies `https://ntfy.sh/tw_moto_exams` on **every** run: slots found → high-priority "Banqiao slots OPEN" with the slot lines and booking link; none → "Banqiao check / no slots this hour"; scraper exit ≠ 0 → high-priority "Banqiao checker ERROR" with the output tail.
-
-### Push notifications via ntfy
-
-The notify step is a single `curl` to [ntfy.sh](https://ntfy.sh) — no secrets, no account, no SMTP setup. Subscribe to the topic on your phone:
-
-1. Install the [ntfy app](https://ntfy.sh/app) (iOS / Android / web).
-2. Subscribe to topic `tw_moto_exams`.
-
-ntfy topics are public-by-obscurity — anyone who knows the topic name can read or post to it. The motorcycle slot data isn't sensitive, but if you want to lock it down later, ntfy supports auth and self-hosted instances. Topic name is hardcoded at [.github/workflows/scrape.yml](.github/workflows/scrape.yml) — change it there + on your phone if you want a different one.
-
-### Caveats
-
-- **Schedule is best-effort.** GitHub-cron jobs can be delayed by up to ~15 min during peak load — expect the hourly push at :00–:15, not on the dot.
-- **Inactive-repo pause.** GitHub auto-pauses scheduled workflows after 60 days without a push. Any commit reactivates them. With always-notify, the pause is at least visible: the hourly pushes stop.
-- **No state across runs.** Every run that finds slots fires a fresh notification; we don't dedupe against previous runs.
-- **Free-tier is plenty.** 9 runs/day × ~2 min/run ≈ 9 hours/month, against 2,000 min/month free for private repos (unlimited for public).
-
-## Running locally on macOS (launchd)
-
-Alternative to GitHub Actions: [run_check.sh](run_check.sh) runs the same Banqiao check and pushes the result to ntfy on every run, and [launchd/com.twmoto.slotcheck.plist](launchd/com.twmoto.slotcheck.plist) schedules it hourly 08:00–16:00 local time. Pick **one** scheduler — running both means two pushes per hour.
+[run_check.sh](run_check.sh) runs the Banqiao 普通重型機車 check and pushes the result to ntfy on every run — slots found → high-priority "Banqiao slots OPEN" with the slot lines and booking link; none → "Banqiao check / no slots this hour"; scraper exit ≠ 0 → high-priority "Banqiao checker ERROR" with the output. Since every run notifies, silence unambiguously means the job didn't run. [launchd/com.twmoto.slotcheck.plist](launchd/com.twmoto.slotcheck.plist) schedules it hourly 08:00–16:00 local time.
 
 Install (from the repo root, with `.venv` already set up per "Local run" above):
 
@@ -54,11 +28,34 @@ Test immediately: `launchctl kickstart -k gui/$(id -u)/com.twmoto.slotcheck` (lo
 
 Uninstall: `launchctl bootout gui/$(id -u)/com.twmoto.slotcheck && rm ~/Library/LaunchAgents/com.twmoto.slotcheck.plist`.
 
-Caveats vs Actions: fire times missed while the Mac sleeps coalesce into a single run on wake (lid closed all morning = no checks all morning), and the schedule is in the Mac's local timezone — the plist assumes Asia/Taipei.
+Caveats:
 
-## Why not Claude Code cloud routines?
+- **Sleep skips checks.** Fire times missed while the Mac sleeps coalesce into a single run on wake — lid closed all morning means no checks all morning.
+- **Local timezone.** The plist schedules in the Mac's local time and assumes Asia/Taipei.
+- **No state across runs.** Every run that finds slots fires a fresh notification; no dedupe against previous runs.
 
-Two failed attempts, two different walls. (1) May 2026: the routine env allowlist blocks `cdn.playwright.dev`, so `playwright install` couldn't fetch a browser — since fixed by the pre-installed `/opt/pw-browsers` Chromium and `chromium_executable()` in [check_moto_test.py](check_moto_test.py). (2) July 2026: even with full network access, mvdis.gov.tw resets connections from the Claude cloud egress (foreign datacenter IP and/or proxy TLS fingerprint) — `net::ERR_CONNECTION_RESET` on both Chromium and plain curl, while ntfy.sh works fine. Nothing configurable inside the environment changes the egress, so cloud routines are a dead end for this site. GitHub Actions runners get through fine.
+## GitHub Actions (manual runs only)
+
+The workflow at [.github/workflows/scrape.yml](.github/workflows/scrape.yml) keeps the same check + always-notify logic behind `workflow_dispatch`, useful for testing the pipeline from the Actions tab. Its cron is deliberately removed: mvdis drops GH runner traffic, so scheduled runs could only ever produce timeout noise (or worse, the pre-July behavior — two months of green runs that were really 8 timeouts printed as "no slots").
+
+### Push notifications via ntfy
+
+The notify step is a single `curl` to [ntfy.sh](https://ntfy.sh) — no secrets, no account, no SMTP setup. Subscribe to the topic on your phone:
+
+1. Install the [ntfy app](https://ntfy.sh/app) (iOS / Android / web).
+2. Subscribe to topic `tw_moto_exams`.
+
+ntfy topics are public-by-obscurity — anyone who knows the topic name can read or post to it. The motorcycle slot data isn't sensitive, but if you want to lock it down later, ntfy supports auth and self-hosted instances. Topic name is hardcoded in [run_check.sh](run_check.sh) and [.github/workflows/scrape.yml](.github/workflows/scrape.yml) — change it there + on your phone if you want a different one.
+
+## Why not the cloud? (postmortem)
+
+Three attempts, three walls — all variants of "mvdis doesn't talk to datacenters":
+
+1. **Claude Code cloud routine, May 2026:** the routine env allowlist blocks `cdn.playwright.dev`, so `playwright install` couldn't fetch a browser. Since fixed by the pre-installed `/opt/pw-browsers` Chromium and `chromium_executable()` in [check_moto_test.py](check_moto_test.py) — but irrelevant given wall 3.
+2. **GitHub Actions cron, May–July 2026:** every scheduled run "succeeded" while every query inside it timed out (`Page.goto` 60s timeouts / `ERR_CONNECTION_TIMED_OUT`) — verified in job logs back to May 12. The pre-July script had no failure semantics, so two months of runs printed "no slots" and exited 0. The cron is now removed; the failure-semantics fix (exit 1 + `ERROR:` line when every query fails) exists so this class of silent failure can't recur.
+3. **Claude Code cloud routine, July 2026:** with browser fixed and full network egress, mvdis resets the connection (`net::ERR_CONNECTION_RESET` on both Chromium and plain curl) while ntfy.sh works fine — the block is on the egress IP / proxy fingerprint, not configuration.
+
+Lesson: verify the scrape actually reached the site before trusting any green run. `額滿` for datacenters, apparently.
 
 ## Implementation notes
 
