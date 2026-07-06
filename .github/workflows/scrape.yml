@@ -2,9 +2,14 @@ name: Check moto test slots
 
 on:
   schedule:
-    # Every 3h from 08:00–20:00 Asia/Taipei (UTC+8) → 00,03,06,09,12 UTC.
-    - cron: "0 0,3,6,9,12 * * *"
+    # Hourly 08:00–16:00 Asia/Taipei (UTC+8) → 00–08 UTC.
+    - cron: "0 0-8 * * *"
   workflow_dispatch:
+
+# Banqiao 普通重型機車 only. Clear these to scan the full station × license matrix.
+env:
+  MVDIS_STATIONS: 板橋
+  MVDIS_LICENSES: 普通重型機車
 
 jobs:
   scrape:
@@ -28,16 +33,43 @@ jobs:
       - name: Run scrape
         id: scrape
         run: |
+          set +e
           python check_moto_test.py | tee scrape-output.txt
-          if grep -q "^Upcoming motorcycle road-test slots" scrape-output.txt; then
-            echo "has_slots=true" >> "$GITHUB_OUTPUT"
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            echo "result=error" >> "$GITHUB_OUTPUT"
+          elif grep -q "^Upcoming motorcycle road-test slots" scrape-output.txt; then
+            echo "result=open" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=none" >> "$GITHUB_OUTPUT"
           fi
 
+      # Every run pushes to ntfy, whatever the outcome — silence means the
+      # workflow itself didn't run (GH cron delay, paused schedule, etc.).
+      # Titles are ASCII because ntfy headers don't take raw UTF-8.
       - name: Notify via ntfy
-        if: steps.scrape.outputs.has_slots == 'true'
+        if: always() && steps.scrape.outputs.result != ''
         run: |
+          case "${{ steps.scrape.outputs.result }}" in
+            open)
+              printf '%s\n\nBook: https://www.mvdis.gov.tw/m3-emv-trn/exm/locations#\n' "$(cat scrape-output.txt)" > body.txt
+              title="Banqiao slots OPEN"
+              priority="high"
+              ;;
+            none)
+              printf 'No 普通重型機車 slots at 板橋 this hour.\n' > body.txt
+              title="Banqiao check"
+              priority="default"
+              ;;
+            error)
+              tail -c 1500 scrape-output.txt > body.txt
+              title="Banqiao checker ERROR"
+              priority="high"
+              ;;
+          esac
           curl --fail-with-body \
-            -H "Title: Motorcycle road-test slots — Taipei / New Taipei" \
+            -H "Title: $title" \
+            -H "Priority: $priority" \
             -H "Tags: motor_scooter" \
-            --data-binary @scrape-output.txt \
+            --data-binary @body.txt \
             https://ntfy.sh/tw_moto_exams
