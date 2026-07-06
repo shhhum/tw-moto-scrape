@@ -1,6 +1,6 @@
 # tw-moto-scrape
 
-A Playwright async scraper that checks [mvdis.gov.tw](https://www.mvdis.gov.tw/m3-emv-trn/exm/locations) for upcoming motorcycle road-test (路考) slots at Taipei (臺北市) and New Taipei (新北市) DMV stations. Runs on GitHub Actions every 3 hours and pushes a notification to ntfy.sh when slots are open.
+A Playwright async scraper that checks [mvdis.gov.tw](https://www.mvdis.gov.tw/m3-emv-trn/exm/locations) for upcoming motorcycle road-test (路考) slots at Taipei (臺北市) and New Taipei (新北市) DMV stations. Runs hourly (8am–4pm Taipei) on GitHub Actions, targeting Banqiao 普通重型機車, and pushes a notification to ntfy.sh on every run — slots open, no slots, or error. A local launchd runner is included as an alternative scheduler.
 
 ## Local run
 
@@ -13,14 +13,15 @@ python3 check_moto_test.py
 
 ## Deploying to GitHub Actions
 
-Goal: run every 3 hours from 8am–8pm Taipei time and surface matching slots in the Actions run log.
+Goal: check Banqiao 普通重型機車 hourly from 8am–4pm Taipei time and push the result to the phone every run, so silence unambiguously means "the workflow didn't run".
 
 The workflow at [.github/workflows/scrape.yml](.github/workflows/scrape.yml):
 
-- Triggers on cron `0 0,3,6,9,12 * * *` (UTC), which is 08:00, 11:00, 14:00, 17:00, 20:00 Asia/Taipei.
+- Triggers on cron `0 0-8 * * *` (UTC), which is hourly 08:00–16:00 Asia/Taipei (9 runs/day).
 - Also exposes `workflow_dispatch` so you can run it on-demand from the Actions tab.
+- Narrows the scrape via `MVDIS_STATIONS=板橋` / `MVDIS_LICENSES=普通重型機車` job env vars — clear them to scan the full station × license matrix.
 - Sets up Python 3.12 with pip cache, installs `requirements.txt`, runs `playwright install --with-deps chromium`, then executes the script.
-- If the script's output contains `Upcoming motorcycle road-test slots`, POSTs the output as a push notification to `https://ntfy.sh/tw_moto_exams`. No-slot runs stay silent — the GH Actions log still has the full output if you want to verify.
+- Notifies `https://ntfy.sh/tw_moto_exams` on **every** run: slots found → high-priority "Banqiao slots OPEN" with the slot lines and booking link; none → "Banqiao check / no slots this hour"; scraper exit ≠ 0 → high-priority "Banqiao checker ERROR" with the output tail.
 
 ### Push notifications via ntfy
 
@@ -33,48 +34,31 @@ ntfy topics are public-by-obscurity — anyone who knows the topic name can read
 
 ### Caveats
 
-- **Schedule is best-effort.** GitHub-cron jobs can be delayed by up to ~15 min during peak load. Fine for a 3-hour cadence.
-- **Inactive-repo pause.** GitHub auto-pauses scheduled workflows after 60 days without a push. Any commit reactivates them.
+- **Schedule is best-effort.** GitHub-cron jobs can be delayed by up to ~15 min during peak load — expect the hourly push at :00–:15, not on the dot.
+- **Inactive-repo pause.** GitHub auto-pauses scheduled workflows after 60 days without a push. Any commit reactivates them. With always-notify, the pause is at least visible: the hourly pushes stop.
 - **No state across runs.** Every run that finds slots fires a fresh notification; we don't dedupe against previous runs.
-- **Free-tier is plenty.** 5 runs/day × ~2 min/run ≈ 5 hours/month, against 2,000 min/month free for private repos (unlimited for public).
+- **Free-tier is plenty.** 9 runs/day × ~2 min/run ≈ 9 hours/month, against 2,000 min/month free for private repos (unlimited for public).
 
-## Claude Code routine (Banqiao 普通重型機車, hourly)
+## Running locally on macOS (launchd)
 
-An earlier routine attempt failed because the routine env's allowlist blocks `cdn.playwright.dev`, so `playwright install` couldn't fetch a browser. That's moot now: Claude Code cloud environments ship a pre-installed Chromium at `/opt/pw-browsers`, and the script falls back to it automatically (`chromium_executable()` in [check_moto_test.py](check_moto_test.py)). Still never run `playwright install` in the cloud env — it will fail and isn't needed.
+Alternative to GitHub Actions: [run_check.sh](run_check.sh) runs the same Banqiao check and pushes the result to ntfy on every run, and [launchd/com.twmoto.slotcheck.plist](launchd/com.twmoto.slotcheck.plist) schedules it hourly 08:00–16:00 local time. Pick **one** scheduler — running both means two pushes per hour.
 
-### Environment (claude.ai/code → Environments)
+Install (from the repo root, with `.venv` already set up per "Local run" above):
 
-- **Repository:** `shhhum/tw-moto-scrape`
-- **Network policy:** trusted/custom allowlist including `mvdis.gov.tw` and `www.mvdis.gov.tw` (the browser traffic rides the env proxy automatically). Add `ntfy.sh` if you want the routine to push to your phone via the existing `tw_moto_exams` topic.
-- **Setup script:**
+```bash
+sed "s|__REPO__|$(pwd)|g" launchd/com.twmoto.slotcheck.plist > ~/Library/LaunchAgents/com.twmoto.slotcheck.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.twmoto.slotcheck.plist
+```
 
-  ```bash
-  pip install -r requirements.txt
-  ```
+Test immediately: `launchctl kickstart -k gui/$(id -u)/com.twmoto.slotcheck` (logs land in `/tmp/twmoto-slotcheck.log`).
 
-- **Env vars (optional — the routine prompt can also set them inline):** `MVDIS_STATIONS=板橋`, `MVDIS_LICENSES=普通重型機車`.
+Uninstall: `launchctl bootout gui/$(id -u)/com.twmoto.slotcheck && rm ~/Library/LaunchAgents/com.twmoto.slotcheck.plist`.
 
-### Schedule
+Caveats vs Actions: fire times missed while the Mac sleeps coalesce into a single run on wake (lid closed all morning = no checks all morning), and the schedule is in the Mac's local timezone — the plist assumes Asia/Taipei.
 
-Hourly 08:00–16:00 Asia/Taipei, daily → UTC cron `0 0-8 * * *` (9 runs/day).
+## Why not Claude Code cloud routines?
 
-### Routine prompt
-
-Every run notifies the phone, whatever the outcome — via ntfy (rich content) and via the routine's built-in push (enable push notifications on the routine; the prompt marks every run noteworthy).
-
-> Check for open 普通重型機車 (ordinary heavy motorbike) road-test slots at 板橋 (Banqiao) and ALWAYS push a phone notification with the result. From the repo root run:
->
-> `MVDIS_STATIONS=板橋 MVDIS_LICENSES=普通重型機車 python3 check_moto_test.py`
->
-> Dependencies are installed by the environment setup script and Chromium is pre-installed — never run `playwright install`.
->
-> Then notify, every run, regardless of outcome:
->
-> - Slots open (output starts with "Upcoming motorcycle road-test slots"): `curl -H "Title: 板橋 slots OPEN" -H "Priority: high" -d "<slot lines + booking link https://www.mvdis.gov.tw/m3-emv-trn/exm/locations#>" ntfy.sh/tw_moto_exams`
-> - No slots: `curl -H "Title: 板橋 check" -d "No 普通重型機車 slots at 板橋 this hour." ntfy.sh/tw_moto_exams`
-> - Nonzero exit or "ERROR" output: retry once; if it still fails, `curl -H "Title: 板橋 checker ERROR" -H "Priority: high" -d "<error summary>" ntfy.sh/tw_moto_exams`. Do not rewrite the scraper.
->
-> Treat every run as noteworthy. End with a one-line summary: the result and whether the ntfy push succeeded (if the curl fails, ntfy.sh is missing from the environment allowlist — say so).
+Two failed attempts, two different walls. (1) May 2026: the routine env allowlist blocks `cdn.playwright.dev`, so `playwright install` couldn't fetch a browser — since fixed by the pre-installed `/opt/pw-browsers` Chromium and `chromium_executable()` in [check_moto_test.py](check_moto_test.py). (2) July 2026: even with full network access, mvdis.gov.tw resets connections from the Claude cloud egress (foreign datacenter IP and/or proxy TLS fingerprint) — `net::ERR_CONNECTION_RESET` on both Chromium and plain curl, while ntfy.sh works fine. Nothing configurable inside the environment changes the egress, so cloud routines are a dead end for this site. GitHub Actions runners get through fine.
 
 ## Implementation notes
 
