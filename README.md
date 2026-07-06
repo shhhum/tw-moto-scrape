@@ -60,15 +60,21 @@ Hourly 08:00–16:00 Asia/Taipei, daily → UTC cron `0 0-8 * * *` (9 runs/day).
 
 ### Routine prompt
 
-> Check for open 普通重型機車 (ordinary heavy motorbike) road-test slots at 板橋 (Banqiao). From the repo root run:
+Every run notifies the phone, whatever the outcome — via ntfy (rich content) and via the routine's built-in push (enable push notifications on the routine; the prompt marks every run noteworthy).
+
+> Check for open 普通重型機車 (ordinary heavy motorbike) road-test slots at 板橋 (Banqiao) and ALWAYS push a phone notification with the result. From the repo root run:
 >
 > `MVDIS_STATIONS=板橋 MVDIS_LICENSES=普通重型機車 python3 check_moto_test.py`
 >
 > Dependencies are installed by the environment setup script and Chromium is pre-installed — never run `playwright install`.
 >
-> - Output starting with "Upcoming motorcycle road-test slots" means slots are open: send a push via `curl -d "<slot lines>" ntfy.sh/tw_moto_exams`, then finish with a summary of each slot (date, session, seats) and the booking link https://www.mvdis.gov.tw/m3-emv-trn/exm/locations#. Mark the run noteworthy.
-> - Output "No upcoming motorcycle road-test slots" means nothing to do: finish quietly, not noteworthy.
-> - Nonzero exit or "ERROR" output: retry once; if it still fails, report the error output as noteworthy so I can fix the environment. Do not rewrite the scraper.
+> Then notify, every run, regardless of outcome:
+>
+> - Slots open (output starts with "Upcoming motorcycle road-test slots"): `curl -H "Title: 板橋 slots OPEN" -H "Priority: high" -d "<slot lines + booking link https://www.mvdis.gov.tw/m3-emv-trn/exm/locations#>" ntfy.sh/tw_moto_exams`
+> - No slots: `curl -H "Title: 板橋 check" -d "No 普通重型機車 slots at 板橋 this hour." ntfy.sh/tw_moto_exams`
+> - Nonzero exit or "ERROR" output: retry once; if it still fails, `curl -H "Title: 板橋 checker ERROR" -H "Priority: high" -d "<error summary>" ntfy.sh/tw_moto_exams`. Do not rewrite the scraper.
+>
+> Treat every run as noteworthy. End with a one-line summary: the result and whether the ntfy push succeeded (if the curl fails, ntfy.sh is missing from the environment allowlist — say so).
 
 ## Implementation notes
 
