@@ -8,7 +8,7 @@ A single-file Playwright async scraper that checks mvdis.gov.tw for motorcycle r
 
 Entry point: [check_moto_test.py](check_moto_test.py). No tests, no linter.
 
-Deployments: a GitHub Actions cron workflow at [.github/workflows/scrape.yml](.github/workflows/scrape.yml) (hourly 8am–4pm Asia/Taipei, Banqiao 普通重型機車 only, notifies ntfy.sh every run), with a local macOS launchd alternative ([run_check.sh](run_check.sh) + [launchd/](launchd/)). Claude Code cloud routines are a dead end: mvdis.gov.tw resets connections from Claude cloud egress — see "Why not Claude Code cloud routines?" in [README.md](README.md) before re-attempting.
+Deployment: local macOS launchd only ([run_check.sh](run_check.sh) + [launchd/](launchd/)), hourly 8am–4pm, Banqiao 普通重型機車, notifies ntfy.sh every run. **mvdis.gov.tw drops all datacenter traffic** — GitHub Actions runners time out (two months of green-but-useless cron runs, since removed) and Claude cloud environments get connection resets. Read "Why not the cloud?" in [README.md](README.md) before re-attempting any hosted scheduler; the GH workflow survives as `workflow_dispatch` for pipeline testing only.
 
 ## Setup & run
 
