@@ -4,36 +4,38 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A single-file Playwright async scraper that checks mvdis.gov.tw for motorcycle road-test (路考) slot availability in Taipei (台北) and New Taipei (新北), skipping the hazard-perception exam (危險感知).
+A single-file Playwright async scraper that checks mvdis.gov.tw for motorcycle road-test (路考) slot availability at Taipei / New Taipei DMV stations, skipping the hazard-perception exam (危險感知).
 
 Entry point: [check_moto_test.py](check_moto_test.py). No tests, no linter.
 
-Intended deployment: a GitHub Actions cron workflow (every 3h, 8am–8pm Asia/Taipei). The workflow is at [.github/workflows/scrape.yml](.github/workflows/scrape.yml); [README.md](README.md) has the deploy notes and a "why not Claude routines" rationale (the routine env's outbound allowlist blocked Playwright's Chromium CDN — don't re-litigate without checking the README first).
+Deployments: a GitHub Actions cron workflow at [.github/workflows/scrape.yml](.github/workflows/scrape.yml) (every 3h, 8am–8pm Asia/Taipei, notifies via ntfy.sh), and a Claude Code cloud routine (hourly 8am–4pm Taipei, Banqiao 普通重型機車 only) — [README.md](README.md) documents both, including the routine's environment/allowlist requirements.
 
 ## Setup & run
 
 ```bash
 source .venv/bin/activate          # existing venv (Python 3.14 from Homebrew)
 pip install -r requirements.txt
-playwright install chromium        # one-time browser download
+playwright install chromium        # local only — cloud envs use /opt/pw-browsers
 python3 check_moto_test.py
 ```
 
 ## Architecture
 
-- **Async Playwright, non-headless by default.** Chromium launches with `headless=False` at [check_moto_test.py:23](check_moto_test.py:23) so the run is visible — the target site may need manual interaction (clicking a city or exam type) before slots render.
-- **Selector strategy is a heuristic, not finished.** The script does a broad `query_selector_all("a, button, li, tr, .exam-item, [class*='exam'], [class*='item']")` and filters elements by Chinese substring matches. If the page structure becomes known, replace this with targeted selectors.
-- **Filter pipeline** (per element): must contain a city in `TARGET_CITIES` → must NOT contain a `SKIP_KEYWORDS` token → must contain a date (`\d{2,4}[-/年]\d{1,2}[-/月]\d{1,2}`) or time (`\d{1,2}:\d{2}`) regex hit.
-- **Debug fallback.** When no matches are found, the script dumps the first 3000 chars of `body` inner text to stdout and saves `mvdis_screenshot.png` (full page). It also prints the first 3000 body chars on every run — useful while iterating, worth gating behind a flag once selectors stabilize.
+- **Drives the real booking form, headless.** Per (station, license type): fill `#licenseTypeCode`, `#expectExamDateStr` (today's ROC date — mandatory, see below), `#dmvNoLv1`/`#dmvNo`, submit via the `a.std_btn[onclick*='query']` JS link, then parse `#trnTable tbody tr` rows into date / description / seat count.
+- **Headless soft-block bypass.** mvdis 302-loops requests whose UA or `sec-ch-ua` reveals HeadlessChrome; the script spoofs both and launches with `--disable-blink-features=AutomationControlled`. Don't remove any of the three.
+- **Chromium fallback for cloud envs.** `chromium_executable()` prefers `/opt/pw-browsers/chromium` when it exists (Claude Code cloud envs pre-install it; their allowlist blocks `playwright install`). Locally it returns None and Playwright resolves its own browser.
+- **Asset blocking.** Images/fonts/stylesheets and Google-domain requests are aborted via `ctx.route` — they dominate wall-clock from non-Taiwan runners and don't affect the form.
+- **Failure semantics.** Individual query failures warn and continue; if *every* query fails the script exits 1 with an `ERROR:` line so cron consumers can distinguish "site unreachable" from "no slots".
 
 ## Config knobs
 
-The three top-level constants at [check_moto_test.py:16-18](check_moto_test.py:16) drive everything — edit them to retarget the scraper:
-
-- `TARGET_CITIES` — Chinese city substrings to match.
-- `SKIP_KEYWORDS` — Chinese exam-type substrings to exclude.
-- `URL` — mvdis exam-locations page.
+- `STATIONS` / `MOTORCYCLE_LICENSES` constants in [check_moto_test.py](check_moto_test.py) — the full query matrix (station IDs distilled from the live dropdowns; refresh via the discovery snippet in commit history if they drift).
+- `MVDIS_STATIONS` / `MVDIS_LICENSES` env vars — comma-separated substrings that narrow the matrix at runtime (e.g. `MVDIS_STATIONS=板橋 MVDIS_LICENSES=普通重型機車`). A filter matching nothing exits nonzero rather than silently scraping nothing.
+- `SKIP_KEYWORDS` — Chinese exam-type substrings excluded from result rows.
 
 ## Domain notes
 
-The scraped page is Traditional Chinese. All matching is on raw Chinese substrings (路考, 危險感知, 台北, 新北) — do not lowercase, ASCII-fold, or otherwise normalize text before matching.
+- The scraped page is Traditional Chinese. All matching is on raw Chinese substrings (路考, 危險感知, 額滿, 板橋…) — do not lowercase, ASCII-fold, or otherwise normalize text before matching.
+- `expectExamDateStr` must contain an ROC date (民國 `YYYMMDD`) or the server reports "查詢不到符合的考試場次" for every station regardless of availability.
+- `額滿` in the seats column is a "full" sentinel, not a count — those rows are dropped.
+- The output prefix `Upcoming motorcycle road-test slots` is load-bearing: the GH Actions notify step and the Claude routine prompt both key off it.

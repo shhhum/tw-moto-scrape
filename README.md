@@ -38,9 +38,37 @@ ntfy topics are public-by-obscurity — anyone who knows the topic name can read
 - **No state across runs.** Every run that finds slots fires a fresh notification; we don't dedupe against previous runs.
 - **Free-tier is plenty.** 5 runs/day × ~2 min/run ≈ 5 hours/month, against 2,000 min/month free for private repos (unlimited for public).
 
-### Why not Claude routines?
+## Claude Code routine (Banqiao 普通重型機車, hourly)
 
-Tried it; the routine env's outbound allowlist blocks `cdn.playwright.dev`, so `playwright install` can't fetch the Chromium-for-Testing binary that Python Playwright 1.59 expects. Hosted-browser MCPs (Browserbase et al.) would work but cost ~$10/mo and require rewriting the script as a prompt. GitHub Actions has no allowlist, runs the script as-is, and is free at this volume.
+An earlier routine attempt failed because the routine env's allowlist blocks `cdn.playwright.dev`, so `playwright install` couldn't fetch a browser. That's moot now: Claude Code cloud environments ship a pre-installed Chromium at `/opt/pw-browsers`, and the script falls back to it automatically (`chromium_executable()` in [check_moto_test.py](check_moto_test.py)). Still never run `playwright install` in the cloud env — it will fail and isn't needed.
+
+### Environment (claude.ai/code → Environments)
+
+- **Repository:** `shhhum/tw-moto-scrape`
+- **Network policy:** trusted/custom allowlist including `mvdis.gov.tw` and `www.mvdis.gov.tw` (the browser traffic rides the env proxy automatically). Add `ntfy.sh` if you want the routine to push to your phone via the existing `tw_moto_exams` topic.
+- **Setup script:**
+
+  ```bash
+  pip install -r requirements.txt
+  ```
+
+- **Env vars (optional — the routine prompt can also set them inline):** `MVDIS_STATIONS=板橋`, `MVDIS_LICENSES=普通重型機車`.
+
+### Schedule
+
+Hourly 08:00–16:00 Asia/Taipei, daily → UTC cron `0 0-8 * * *` (9 runs/day).
+
+### Routine prompt
+
+> Check for open 普通重型機車 (ordinary heavy motorbike) road-test slots at 板橋 (Banqiao). From the repo root run:
+>
+> `MVDIS_STATIONS=板橋 MVDIS_LICENSES=普通重型機車 python3 check_moto_test.py`
+>
+> Dependencies are installed by the environment setup script and Chromium is pre-installed — never run `playwright install`.
+>
+> - Output starting with "Upcoming motorcycle road-test slots" means slots are open: send a push via `curl -d "<slot lines>" ntfy.sh/tw_moto_exams`, then finish with a summary of each slot (date, session, seats) and the booking link https://www.mvdis.gov.tw/m3-emv-trn/exm/locations#. Mark the run noteworthy.
+> - Output "No upcoming motorcycle road-test slots" means nothing to do: finish quietly, not noteworthy.
+> - Nonzero exit or "ERROR" output: retry once; if it still fails, report the error output as noteworthy so I can fix the environment. Do not rewrite the scraper.
 
 ## Implementation notes
 
