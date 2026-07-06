@@ -18,11 +18,16 @@ shouldn't appear in this table; we filter them out defensively anyway.
 Setup:
     pip install -r requirements.txt
     playwright install chromium chromium-headless-shell
+    # (skip playwright install in Claude Code cloud envs — a pre-installed
+    #  Chromium at /opt/pw-browsers is picked up automatically)
 Run:
     python3 check_moto_test.py
+Optional narrowing via env vars (comma-separated substrings):
+    MVDIS_STATIONS=板橋 MVDIS_LICENSES=普通重型機車 python3 check_moto_test.py
 """
 
 import asyncio
+import os
 import re
 from datetime import date
 from playwright.async_api import async_playwright
@@ -54,6 +59,40 @@ MOTORCYCLE_LICENSES = [
 
 # Filter out hazard-perception entries if the table ever contains them.
 SKIP_KEYWORDS = ["危險感知", "危感"]
+
+
+def _env_filter(name, items, key):
+    """Narrow a config list via a comma-separated substring env var.
+
+    e.g. MVDIS_STATIONS=板橋 keeps only stations whose friendly name contains
+    板橋; MVDIS_LICENSES=普通重型機車 keeps only that license label. Unset or
+    empty means no filtering. Exits nonzero on a filter that matches nothing —
+    a silent empty scrape looks identical to "no slots".
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return items
+    wanted = [w.strip() for w in raw.split(",") if w.strip()]
+    kept = [it for it in items if any(w in key(it) for w in wanted)]
+    if not kept:
+        raise SystemExit(f"{name}={raw!r} matched none of {[key(it) for it in items]}")
+    return kept
+
+
+def chromium_executable():
+    """Pick the Chromium binary to launch.
+
+    In Claude Code cloud environments the network policy blocks Playwright's
+    browser CDN, but a Chromium build is pre-installed at /opt/pw-browsers.
+    Its revision may not match what this Playwright version pins, in which
+    case Playwright's own resolution fails — fall back to the pre-installed
+    binary. Locally, where `playwright install chromium` has been run, this
+    returns None and Playwright resolves its own browser as usual.
+    """
+    preinstalled = "/opt/pw-browsers/chromium"
+    if os.path.exists(preinstalled):
+        return preinstalled
+    return None
 
 
 def today_roc_date() -> str:
@@ -121,11 +160,14 @@ async def query_one(page, license_label, region_val, dmv_val, exam_date_roc):
 
 async def main():
     exam_date = today_roc_date()
+    stations = _env_filter("MVDIS_STATIONS", STATIONS, key=lambda s: s[2])
+    licenses = _env_filter("MVDIS_LICENSES", MOTORCYCLE_LICENSES, key=lambda l: l)
     sections = []  # (header, [row strings])
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
+            executable_path=chromium_executable(),
             args=["--disable-blink-features=AutomationControlled"],
         )
         ctx = await browser.new_context(
@@ -153,11 +195,15 @@ async def main():
         await ctx.route("**/*", block_junk)
         page = await ctx.new_page()
 
-        for region, dmv, name in STATIONS:
-            for lic in MOTORCYCLE_LICENSES:
+        failures = 0
+        attempts = 0
+        for region, dmv, name in stations:
+            for lic in licenses:
+                attempts += 1
                 try:
                     slots = await query_one(page, lic, region, dmv, exam_date)
                 except Exception as e:
+                    failures += 1
                     print(f"[warn] {name} — {lic}: {type(e).__name__}: {e}")
                     continue
                 if slots:
@@ -169,14 +215,22 @@ async def main():
 
         await browser.close()
 
+    if failures == attempts:
+        # Unreachable site / blocked network must not masquerade as "no slots"
+        # — cron consumers key off exit status and the output prefix.
+        raise SystemExit("ERROR: every query failed — site unreachable or page structure changed.")
+
+    queried = f"{len(stations)} station(s) × {len(licenses)} license type(s)"
     if sections:
-        print("Upcoming motorcycle road-test slots in Taipei / New Taipei DMV centers:\n")
+        # Keep this prefix stable: the GH Actions notify step and the Claude
+        # routine prompt both key off "Upcoming motorcycle road-test slots".
+        print(f"Upcoming motorcycle road-test slots ({queried} queried):\n")
         for header, rows in sections:
             print(header)
             print("\n".join(rows))
             print()
     else:
-        print("No upcoming motorcycle road-test slots in Taipei or New Taipei DMV centers.")
+        print(f"No upcoming motorcycle road-test slots ({queried} queried).")
 
 
 if __name__ == "__main__":
